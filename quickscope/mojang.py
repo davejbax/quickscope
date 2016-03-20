@@ -48,6 +48,16 @@ def create_connection(url):
         return http.client.HTTPConnection(url.host, url.port)
 
 def get_cookies(headers):
+    """Obtains cookies from a set of HTTP headers. The headers are scanned
+    for a 'Set-cookie:' header. If found, this is then parsed into an http.cookies.SimpleCookie()
+    This 'cookie jar' then contains all of the cookies found within the headers.
+
+    Keyword arguments:
+    headers -- Array of (key, value) headers
+
+    Returns a http.cookies.SimpleCookie() instance
+    """
+    
     cookie_headers = [ header[1] for header in headers if header[0].lower() == 'set-cookie' ]
     cookie_jar     = http.cookies.SimpleCookie()
     for h in cookie_headers:
@@ -55,6 +65,15 @@ def get_cookies(headers):
     return cookie_jar
 
 def get_login_error(result):
+    """Convenience function to parse the result of calling mojang#login.
+
+    Keyword arguments:
+    result -- Result returned from calling mojang#login or mojang#api_login
+
+    Returns a string with a descriptive message of the error if any were
+    detected. Otherwise, None is returned (indicating success).
+    """
+    
     if not result: # Failure to get auth token if result is none
         return 'Failed to get authenticity token'
     elif result[0] != 200 and result[0] != 302: # Some failure if wrong response code
@@ -131,6 +150,25 @@ def api_get_login():
     return (resp.status, resp.getheaders())
 
 def api_login(username, password, authenticity_token):
+    """Attempts to login to Mojang and create a session with the given
+    username, password, and authenticity token (a CSRF-like token, which
+    can be obtained with mojang#get_authenticity_token).
+
+    The request is a POST request with the given data and an extra parameter
+    'remember' set to true (to keep the session).
+
+    The request is sent and the response obtained. The data of the response,
+    however, is ignored, as it does not provide any meaningful information
+    of whether the login succeeded.
+
+    Keyword arguments:
+    username -- Username of Mojang account
+    password -- Password of Mojang account
+    authenticity_token -- (string) An authenticity token; see mojang#get_authenticity_token
+
+    Returns a tuple of (response status code, response headers)
+    """
+    
     conn = create_connection(URL_LOGIN)
 
     # Send request with parameters to login and fake User-Agent string
@@ -152,6 +190,22 @@ def api_login(username, password, authenticity_token):
     return (resp.status, resp.getheaders())
 
 def api_get_rename_profile(uuid, login_cookies):
+    """Sends a GET request for the rename profile page. This does not
+    actually request to rename the profile, contrary to the function name.
+    This can be used to obtain an authenticity token that can be used to
+    actually rename the profile.
+
+    To obtain an authenticity token from the result of this function, simply
+    call mojang#get_authenticity_token with the parameter `result[1]`, where
+    result is the result of calling this function.
+
+    Keyword arguments:
+    uuid -- UUID of Minecraft account
+    login_cookies -- Login cookies (see mojang#get_cookies). Needed as this is a restricted area of the site.
+
+    Returns a tuple of (response status code, response headers)
+    """
+    
     conn = create_connection(URL_RENAME_PROFILE)
 
     conn.request('GET', URL_RENAME_PROFILE.path.format(uuid=uuid), None, {
@@ -252,6 +306,21 @@ def get_free_time(username, prev_time = 0):
         return None
 
 def get_authenticity_token(headers):
+    """Attempts to retrieve an authenticity token from a set of
+    headers.
+
+    The authenticity token should exist in a 'Set-cookie:' header.
+    These headers are parsed via the http.cookies module, and then
+    scanned for a 'PLAY_SESSION' cookie. This cookie contains a
+    query string, which is then parsed and scanned for the key '___AT'.
+
+    Keyword arguments:
+    headers -- a (key, value) array of headers
+
+    If the authenticity token is found, it is returned as a string.
+    Otherwise, None is returned.
+    """
+    
     cookies = get_cookies(headers)
     
     # Ensure we have an auth token
@@ -296,6 +365,27 @@ def login(username, password):
     return api_login(username, password, at)
 
 def rename_profile_later(username, password, uuid, new_name, login_cookies = None):
+    """Prepares a request to rename a profile. This will login, if necessary (i.e
+    if login_cookies is None); get an authenticity token to rename the profile;
+    create an HTTP(S) connection to rename a profile; prepare the headers and data
+    to be sent with the request; and create an anonymous function that will send
+    the request.
+
+    Note that the request is not actually sent - the function to send it is returned
+    from this function, so that the request can be sent 'later'.
+
+    Keyword arguments:
+    username -- Mojang username
+    password -- Mojang password
+    uuid -- UUID of Minecraft account
+    new_name -- New (desired) username
+    login_cookies -- (optional) login cookies obtained via calling mojang#get_cookies on a login response
+
+    Returns a tuple of (f, connection, login_cookies), where:
+       f -- anonymous function f(connection), where connection is an http.client.HTTP(S)Connection
+       connection -- HTTPSConnection instance obtained via create_connection; connected to rename profile page
+       login_cookies -- The generated login cookies, if none were passed.
+    """
     
     # Login if needed to
     if login_cookies is None:
@@ -307,16 +397,6 @@ def rename_profile_later(username, password, uuid, new_name, login_cookies = Non
         error = get_login_error(result)
         if error is not None:
             return (False, error, None)
-
-        """
-        if not result: # Failure to get auth token if result is none
-            return (False, 'Failed to get authenticity token', None)
-        elif result[0] != 200 and result[0] != 302: # Some failure if wrong response code
-            print(type(result[0]))
-            return (False, 'Unrecognized response code: {}'.format(result[0]), None)
-        elif len([ header for header in result[1] if header[0].lower() == 'location' and header[1].lower()[-6:] == URL_LOGIN.path ]) > 0: # Incorrect login if redirecting to /login
-            return (False, 'Incorrect login', None)
-    """
         
         # Store login cookies
         login_cookies = get_cookies(result[1])
@@ -349,8 +429,26 @@ def rename_profile_later(username, password, uuid, new_name, login_cookies = Non
     return (execute, conn, login_cookies)
         
 def time_rename_profile(number, username, password, uuid, login_cookies = None):
+    """Attempts to gauge how long it will take for a round trip of renaming a profile via
+    Mojang's (obscured) API. This will send a number of requests to the URL with dummy
+    data. The username and password are required to login if login_cookies is None.
+
+    Note that this will not actually rename the profile; instead, dummy data is passed:
+    the password is blank and the username is 'Notch'.
+
+    Keyword arguments:
+    number -- Number of fake requests to send
+    username -- Username of Mojang account (only required if login_cookies is None)
+    password -- Password of Mojang account (only required if login_cookies is None)
+    uuid -- UUID of Minecraft account that will be renamed
+    login_cookies -- Existing login_cookies (see mojang#get_cookies)
+
+    Returns the average round-trip time to rename a profile, or 0 if something failed
+    (e.g. could not connect, could not login)
+    """
+    
     if number <= 0:
-        return
+        return 0
 
     # Login if necessary
     if not login_cookies:
@@ -378,72 +476,3 @@ def time_rename_profile(number, username, password, uuid, login_cookies = None):
         total += (after - before)
 
     return total / number
-    
-# [debug]
-#print(login('daviga404+test@gmail.com', 'Memes are the foundation of the soul.'))
-"""
-print("timing...")
-time = time_rename_profile(20, 'daviga404+dynamited3@gmail.com', '', 'c7360a33376042018089e50262e304cb')
-print("average time: {}ms".format(time * 1000))
-#(future, conn, login_cookies) = rename_profile_later('daviga404+dynamited3@gmail.com', '', 'c7360a33376042018089e50262e304cb', 'kek')
-"""
-"""
-if future == False:
-    print('Failed: {}'.format(conn))
-else:
-    input("press something to continue")
-    before = time.perf_counter()
-    future(conn)
-    after = time.perf_counter()
-    print('Took {}ms'.format((after - before) * 1000))
-"""
-
-"""
-
-(status, headers, body) = login('daviga404+dynamited3@gmail.com', '')
-login_cookies = get_cookies(headers)
-
-(status, headers) = api_get_rename_profile('c7360a33376042018089e50262e304cb', login_cookies)
-at = get_authenticity_token(headers)
-
-before = time.perf_counter()
-conn = create_connection(URL_RENAME_PROFILE)
-#print('create_connection: {}s'.format(time.perf_counter() - before))
-
-time.sleep(25)
-
-conn.request('POST', URL_RENAME_PROFILE.path.format(uuid='c7360a33376042018089e50262e304cb'), urllib.parse.urlencode({
-    'newName': 'bob',
-    'password': '',
-    'authenticityToken': at
-}),
-{
-    'User-Agent': USER_AGENT,
-    'Accept-Encoding': 'gzip, deflate',
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Cookie': get_cookies(headers).output(attrs=[], header='', sep='; ')
-})
-
-print('request: {}ms'.format((time.perf_counter() - before) * 1000))
-
-#resp = conn.getresponse()
-"""
-"""
-print(resp.getheaders())
-print(resp.status)6
-print(resp.read())
-"""
-"""
-cookie_headers = [ header[1] for header in headers if header[0].lower() == 'set-cookie' ]
-cookie_jar = http.cookies.SimpleCookie()
-for cookie in cookie_headers:
-    cookie_jar.load(cookie)76
-
-
-cookiess = [ header[1] for header in headers if header[0].lower() == 'set-cookie' ]
-testco = ','.join(cookiess)
-at_cookies = [ cookie for cookie in cookiess if cookie[:12].lower() == 'play_session' ]
-c = cookies.SimpleCookie()
-c.load(cookiess[0])
-c.load(cookiess[1])
-print(c)"""
